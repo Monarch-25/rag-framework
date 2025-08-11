@@ -90,7 +90,7 @@ class PersistentConversationAgent:
     def talk_to_doc(self, state: MessagesState):
         """
         Handles the 'talk to document' flow using a persistent RAG pipeline.
-        Documents are indexed only once per session.
+        New documents are processed and added; duplicates are automatically skipped.
         """
         state["current_node"] = "talk_to_doc"
         self.chat_response.persona = "talk_to_doc"
@@ -102,15 +102,20 @@ class PersistentConversationAgent:
         rag_agent = PersistentRAGAgent(chat_request=self.chat_request, chat_link_data=self.chat_link_data, ccconfig=self.ccconfig)
         
         try:
-            if self.user_files_content and not rag_agent.session_has_documents(session_id):
-                _logger.info(f"No documents found for session '{session_id}'. Indexing now.")
+            # If new file content is provided, trigger the ingestion process.
+            # The RAG agent's `add_documents_for_session` will handle de-duplication.
+            if self.user_files_content:
+                _logger.info(f"New file content received for session '{session_id}'. Processing for ingestion.")
                 docs = [Document(page_content=self.user_files_content, metadata={"source": "uploaded_document"})]
                 text_splitter = get_chunker(self.chunking_strategy, rag_agent)
                 chunks = text_splitter.split_documents(docs)
                 rag_agent.add_documents_for_session(user_id=user_id, session_id=session_id, documents=chunks)
             else:
-                _logger.info(f"Documents for session '{session_id}' are already indexed or no new content provided. Skipping indexing.")
+                _logger.info(f"No new file content provided. Proceeding with existing documents in session '{session_id}'.")
 
+            # The BM25 retriever needs some documents to be initialized.
+            # We'll use the latest user content for this, but the main retrieval
+            # will be against the full persistent session store.
             temp_docs_for_bm25 = [Document(page_content=self.user_files_content)] if self.user_files_content else []
             retriever = rag_agent.get_retriever_for_session(session_id=session_id, user_docs=temp_docs_for_bm25)
             

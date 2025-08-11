@@ -22,13 +22,15 @@ from models.conversation import CCChatRequest, CCConfig
 from models.models import ChatLinkBase
 from common.logs_util import LogsUtil
 from memorydb.auth import ElastiCacheIAMProvider, MemoryDB as RawMemoryDBClient
+# Import the refactored data management functions
+from . import utils
 
 _logger = LogsUtil("FID.AI fastapi -> PersistentRAGAgent").get_logger()
 
 class PersistentRAGAgent:
     """
-    Manages a stateful, session-based RAG lifecycle.
-    Documents are associated with a session_id and persist for a defined TTL.
+    Manages a stateful, session-based RAG lifecycle by coordinating with utility
+    functions that handle the direct data operations.
     """
     def __init__(self, chat_request: CCChatRequest, chat_link_data: ChatLinkBase, ccconfig: CCConfig):
         self.chat_request = chat_request
@@ -102,10 +104,10 @@ class PersistentRAGAgent:
                 redis_url=self.redis_url,
             )
         except redis.exceptions.ResponseError:
-            _logger.info(f"Index '{self.index_name}' not found. Creating new index with session support.")
-            # Multi-tenant schema with a filterable session_id tag
+            _logger.info(f"Index '{self.index_name}' not found. Creating new index with session and de-duplication support.")
+            # Schema is now defined in the utility but the agent ensures it's created.
             schema = {
-                "tag": [{"name": "user_id"}, {"name": "session_id"}],
+                "tag": [{"name": "user_id"}, {"name": "session_id"}, {"name": "doc_hash"}],
                 "text": [{"name": "source"}],
             }
             return Redis.from_documents(
@@ -117,26 +119,16 @@ class PersistentRAGAgent:
             )
 
     def add_documents_for_session(self, user_id: str, session_id: str, documents: List[Document], ttl_seconds: int = 14400):
-        """Adds documents to the index, tagging them with user and session IDs, and setting a TTL."""
-        _logger.info(f"Adding {len(documents)} chunks for user '{user_id}' in session '{session_id}' with TTL {ttl_seconds}s.")
-        
-        for doc in documents:
-            doc.metadata["user_id"] = user_id
-            doc.metadata["session_id"] = session_id
-        
-        # LangChain's Redis client returns the keys it created.
-        keys_added = self.vectorstore.add_documents(documents)
-        
-        # Set TTL on each key as the primary cleanup mechanism
-        if keys_added:
-            _logger.info(f"Setting TTL for {len(keys_added)} new keys.")
-            pipeline = self.raw_client.pipeline()
-            for key in keys_added:
-                pipeline.expire(key, ttl_seconds)
-            pipeline.execute()
-        
-        _logger.info(f"✅ Successfully added and set TTL for {len(keys_added)} chunks.")
-        return keys_added
+        """Delegates adding documents to the utility function."""
+        return utils.add_documents_for_session(
+            raw_client=self.raw_client,
+            vectorstore=self.vectorstore,
+            index_name=self.index_name,
+            user_id=user_id,
+            session_id=session_id,
+            documents=documents,
+            ttl_seconds=ttl_seconds
+        )
 
     def get_retriever_for_session(self, session_id: str, user_docs: List[Document], k: int = 5):
         """Creates a hybrid retriever for a specific session, filtering by session_id."""
@@ -165,28 +157,9 @@ class PersistentRAGAgent:
         return final_retriever
 
     def session_has_documents(self, session_id: str) -> bool:
-        """Checks if any documents already exist for a given session."""
-        query = Query(f'@session_id:{{{session_id}}}').return_fields('id').paging(0, 1)
-        result = self.raw_client.ft(self.index_name).search(query)
-        return result.total > 0
+        """Delegates checking for documents to the utility function."""
+        return utils.session_has_documents(self.raw_client, self.index_name, session_id)
 
     def delete_documents_for_session(self, session_id: str):
-        """Deletes all documents associated with a specific session_id. For explicit cleanup."""
-        _logger.warning(f"Executing manual deletion for all documents in session: {session_id}")
-        query = Query(f'@session_id:{{{session_id}}}')
-        # This is a simplified deletion. A robust implementation would use `ft.search`
-        # to get all keys and then delete them in a pipeline.
-        # For this example, we assume a small number of keys for simplicity.
-        docs_to_delete = self.raw_client.ft(self.index_name).search(query).docs
-        if not docs_to_delete:
-            _logger.info(f"No documents found for session '{session_id}' to delete.")
-            return
-
-        keys_to_delete = [doc.id for doc in docs_to_delete]
-        _logger.info(f"Found {len(keys_to_delete)} document keys to delete.")
-        
-        pipeline = self.raw_client.pipeline()
-        for key in keys_to_delete:
-            pipeline.delete(key)
-        pipeline.execute()
-        _logger.info(f"✅ Successfully deleted documents for session '{session_id}'.")
+        """Delegates deleting documents to the utility function."""
+        utils.delete_documents_for_session(self.raw_client, self.index_name, session_id)
