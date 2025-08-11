@@ -1,7 +1,7 @@
 """
 Utility functions for managing session-based documents in a Redis vector store.
 This module handles document hashing for de-duplication, adding documents with a TTL,
-and explicit deletion. It is designed to be independent of the core agent logic.
+and explicit deletion.
 """
 import redis
 import hashlib
@@ -68,7 +68,7 @@ def add_documents_for_session(
         except Exception as e:
             _logger.error(f"Failed to set TTL for new keys in session '{session_id}': {e}")
     
-    _logger.info(f"✅ Successfully added and set TTL for {len(keys_added)} chunks.")
+    _logger.info(f"Successfully added and set TTL for {len(keys_added)} chunks.")
     return keys_added
 
 def session_has_documents(raw_client: redis.Redis, index_name: str, session_id: str) -> bool:
